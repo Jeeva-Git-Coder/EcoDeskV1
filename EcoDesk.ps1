@@ -810,10 +810,22 @@ function CheckReferenceLog {
                     $refLogCut = $refLogCutMatch.Matches[0].Groups[1].Value.Trim()
                     $solution = $solutionMatch.Matches[0].Groups[1].Value.Trim()
                     
-                    if ($errorLines | Where-Object { $_ -match [regex]::Escape($refLogCut) }) {
-                        Write-Host "Match found in reference log: $refFile" -ForegroundColor Green
-                        Write-Host "Suggested Solution: $solution" -ForegroundColor Yellow
-                        return
+                    # Split into words
+                    $refLogCutWords = $refLogCut -split '\s+' | Where-Object { $_ }
+                    $matchThreshold = 0.75  # 75% word match tolerance (allows 1-2 words missing/different)
+
+                    foreach ($errorLine in $errorLines) {
+                        $errorLineWords = $errorLine -split '\s+' | Where-Object { $_ }
+                        $commonWords = $refLogCutWords | Where-Object { $errorLineWords -contains $_ }
+                        $matchPercentage = $commonWords.Count / [Math]::Max($refLogCutWords.Count, $errorLineWords.Count)
+
+                        if ($matchPercentage -ge $matchThreshold -and $commonWords.Count -ge 3) {  # Minimum 3 words match
+                            Write-Host "Match found in reference log: $refFile (Match: $($matchPercentage*100)%)" -ForegroundColor Green
+                            Write-Host "Reference Log Cut: $refLogCut" -ForegroundColor Yellow
+                            Write-Host "Matching Error Line: $errorLine" -ForegroundColor Yellow
+                            Write-Host "Suggested Solution: $solution" -ForegroundColor Yellow
+                            return
+                        }
                     }
                 } else {
                     Write-Host "Invalid format in reference file $refFile. Skipping." -ForegroundColor Yellow
@@ -2310,13 +2322,11 @@ function ScanArticles {
         Write-Host "Scan Articles" -ForegroundColor Cyan
         Write-Host "=============" -ForegroundColor Cyan
         
-        # Create directory if it doesn’t exist
         if (-not (Test-Path $ArticlePath)) {
             New-Item -ItemType Directory -Path $ArticlePath -Force | Out-Null
             Write-Host "Created directory $ArticlePath" -ForegroundColor Green
         }
 
-        # Check if default log path exists, prompt for manual input if not
         if (-not (Test-Path $LogPath)) {
             Write-Host "Default log location $LogPath not found." -ForegroundColor Yellow
             $manualLogPath = Read-Host "Please enter the manual log location (e.g., path to log files)"
@@ -2380,9 +2390,6 @@ function ScanArticles {
                 }
             } catch {
                 Write-Host "Failed to fetch article from $url $_" -ForegroundColor Red
-                if ($_.Exception -is [System.Net.WebException]) {
-                    Write-Host "Possible causes: slow response, network issue, or URL requires authentication." -ForegroundColor Yellow
-                }
                 Read-Host "Press Enter to return to menu"
                 return
             }
@@ -2392,7 +2399,6 @@ function ScanArticles {
             return
         }
 
-        # Get log cuts from SearchLogs output
         Write-Host "Searching for log cuts in $LogPath..." -ForegroundColor Yellow
         $logCuts = Get-ChildItem -Path $LogPath -Recurse -Filter "*_logcut.txt" -ErrorAction Stop | ForEach-Object { 
             Write-Host "Processing log cut file: $($_.Name)" -ForegroundColor Green
@@ -2404,18 +2410,20 @@ function ScanArticles {
             return
         }
 
-        # Check for matches
         Write-Host "Scanning content for matches with log cuts..." -ForegroundColor Yellow
         $matchesFound = $false
-        $matchCount = 0
+        $matchThreshold = 0.75  # 75% word match tolerance
+        $articleWords = $articleContent -split '\s+' | Where-Object { $_ }
+
         foreach ($logCut in $logCuts) {
-            $matchCount++
-            Write-Host "Checking match $matchCount of $($logCuts.Count)..." -ForegroundColor Green
-            if ($articleContent -match [regex]::Escape($logCut)) {
+            $logCutWords = $logCut -split '\s+' | Where-Object { $_ }
+            $commonWords = $logCutWords | Where-Object { $articleWords -contains $_ }
+            $matchPercentage = $commonWords.Count / [Math]::Max($logCutWords.Count, $articleWords.Count)
+
+            if ($matchPercentage -ge $matchThreshold -and $commonWords.Count -ge 3) {
                 $matchesFound = $true
-                Write-Host "Match found in article!" -ForegroundColor Green
-                Write-Host "Matching Log Cut:" -ForegroundColor Yellow
-                Write-Host $logCut
+                Write-Host "Match found in article! (Match: $($matchPercentage*100)%)" -ForegroundColor Green
+                Write-Host "Matching Log Cut: $logCut" -ForegroundColor Yellow
                 
                 Write-Host "`nOptions:" -ForegroundColor Cyan
                 Write-Host "1. Open Article in Browser (if URL provided)"
@@ -2470,7 +2478,6 @@ function ScanArticlesWithAnalysis {
         Write-Host "Scan Articles with Log Analysis" -ForegroundColor Cyan
         Write-Host "===============================" -ForegroundColor Cyan
         
-        # Create directories if they don’t exist
         if (-not (Test-Path $ArticlePath)) {
             New-Item -ItemType Directory -Path $ArticlePath -Force | Out-Null
         }
@@ -2478,7 +2485,6 @@ function ScanArticlesWithAnalysis {
             New-Item -ItemType Directory -Path $KBPath -Force | Out-Null
         }
 
-        # Check if default log path exists, prompt for manual input if not
         if (-not (Test-Path $LogPath)) {
             Write-Host "Default log location $LogPath not found." -ForegroundColor Yellow
             $manualLogPath = Read-Host "Please enter the manual log location (e.g., path to log files)"
@@ -2496,30 +2502,14 @@ function ScanArticlesWithAnalysis {
             }
         }
 
-        # Get the latest LogAnalysis report from AnalyzeLogs
-        $logAnalysisReports = Get-ChildItem -Path $LogPath -Filter "LogAnalysis_*.txt" | Sort-Object LastWriteTime -Descending
+        $logAnalysisReports = Get-ChildItem -Path $LogPath -Filter "ErrorReport_*.txt" | Sort-Object LastWriteTime -Descending
         if ($logAnalysisReports.Count -eq 0) {
-            Write-Host "No LogAnalysis files found in $LogPath. Run 'Analyze Logs' first." -ForegroundColor Yellow
+            Write-Host "No ErrorReport files found in $LogPath. Run 'Analyze Logs' first." -ForegroundColor Yellow
             Read-Host "Press Enter to return to menu"
             return
         }
         $latestLogAnalysis = $logAnalysisReports[0]
-        
-        # Extract error lines from LogAnalysis_*.txt
-        $content = Get-Content -Path $latestLogAnalysis.FullName -Raw
-        $errorLines = @()
-        $currentSection = $null
-        foreach ($line in (Get-Content -Path $latestLogAnalysis.FullName)) {
-            if ($line -match "^(Critical|Error|Warning):$") {
-                $currentSection = $matches[1]
-            } elseif ($currentSection -and $line -match "^\s*\d+:") {
-                # Capture lines with numbering (context lines)
-                $errorLines += $line.Trim()
-            } elseif ($currentSection -and $line -match "^\s*$") {
-                # Reset section on blank line
-                $currentSection = $null
-            }
-        }
+        $errorLines = Get-Content -Path $latestLogAnalysis.FullName | Where-Object { $_ -match "Log Line:" } | ForEach-Object { $_.Replace("Log Line: ", "") }
 
         if (-not $errorLines) {
             Write-Host "No errors or warnings found in $latestLogAnalysis" -ForegroundColor Yellow
@@ -2530,26 +2520,31 @@ function ScanArticlesWithAnalysis {
         Write-Host "Using findings from: $($latestLogAnalysis.Name)" -ForegroundColor Yellow
         Write-Host "Found $($errorLines.Count) error/warning lines to search with." -ForegroundColor Green
 
-        # Collect KB URLs from user
         $kbUrls = @()
         do {
             $url = Read-Host "Enter KB article URL (or press Enter to finish)"
             if ($url) { $kbUrls += $url }
         } while ($url)
 
+        $matchesFound = $false
+        $matchThreshold = 0.75  # 75% word match tolerance
+
         # Search local articles
         $localArticles = Get-ChildItem -Path $ArticlePath -File -Filter "*.txt"
         $kbArticles = Get-ChildItem -Path $KBPath -File -Filter "*.txt"
         $allLocalArticles = $localArticles + $kbArticles
 
-        $matchesFound = $false
-        # Search local articles
         foreach ($article in $allLocalArticles) {
             $articleContent = Get-Content -Path $article.FullName -Raw
+            $articleWords = $articleContent -split '\s+' | Where-Object { $_ }
             foreach ($errorLine in $errorLines) {
-                if ($articleContent -match [regex]::Escape($errorLine)) {
+                $errorLineWords = $errorLine -split '\s+' | Where-Object { $_ }
+                $commonWords = $errorLineWords | Where-Object { $articleWords -contains $_ }
+                $matchPercentage = $commonWords.Count / [Math]::Max($errorLineWords.Count, $articleWords.Count)
+
+                if ($matchPercentage -ge $matchThreshold -and $commonWords.Count -ge 3) {
                     $matchesFound = $true
-                    Write-Host "Match found in local article: $($article.Name)" -ForegroundColor Green
+                    Write-Host "Match found in local article: $($article.Name) (Match: $($matchPercentage*100)%)" -ForegroundColor Green
                     Write-Host "Matching Error/Warning: $errorLine" -ForegroundColor Yellow
                     HandleMatch -Content $articleContent -Error $errorLine
                 }
@@ -2560,10 +2555,15 @@ function ScanArticlesWithAnalysis {
         foreach ($url in $kbUrls) {
             try {
                 $webContent = Invoke-WebRequest -Uri $url -UseBasicParsing | Select-Object -ExpandProperty Content
+                $webWords = $webContent -split '\s+' | Where-Object { $_ }
                 foreach ($errorLine in $errorLines) {
-                    if ($webContent -match [regex]::Escape($errorLine)) {
+                    $errorLineWords = $errorLine -split '\s+' | Where-Object { $_ }
+                    $commonWords = $errorLineWords | Where-Object { $webWords -contains $_ }
+                    $matchPercentage = $commonWords.Count / [Math]::Max($errorLineWords.Count, $webWords.Count)
+
+                    if ($matchPercentage -ge $matchThreshold -and $commonWords.Count -ge 3) {
                         $matchesFound = $true
-                        Write-Host "Match found in KB URL: $url" -ForegroundColor Green
+                        Write-Host "Match found in KB URL: $url (Match: $($matchPercentage*100)%)" -ForegroundColor Green
                         Write-Host "Matching Error/Warning: $errorLine" -ForegroundColor Yellow
                         HandleMatch -Content $webContent -Error $errorLine -Url $url
                     }
