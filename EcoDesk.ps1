@@ -1756,24 +1756,37 @@ function SaveKBArticle {
 
 function ManageTroubleshootingSteps {
     param (
-        [string]$Destination ="$env:USERPROFILE\Desktop\EcoDesk\Config"
+        [string]$Destination = "$env:USERPROFILE\Desktop\EcoDesk\Solution Tree\$global:Case"
     )
 
-    # Load existing custom steps with error handling
-    $stepsFile = Join-Path -Path $Destination -ChildPath "CustomSteps.json"
-    $customSteps = try {
-        if (Test-Path $stepsFile) {
-            Get-Content -Path $stepsFile -Raw | ConvertFrom-Json -ErrorAction Stop
-        } else {
-            @{}
-        }
-    } catch {
-        Write-Host "Error loading custom steps from $stepsFile $_" -ForegroundColor Red
-        Write-Host "Starting with an empty steps collection." -ForegroundColor Yellow
+    # Admin credentials
+    $adminUsername = "admin"
+    $adminPassword = "admin@123"
+
+    # Authentication
+    Clear-Host
+    Write-Host "Admin Authentication Required" -ForegroundColor Cyan
+    $inputUsername = Read-Host "Enter username"
+    $inputPassword = Read-Host "Enter password" -AsSecureString
+    $inputPasswordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($inputPassword))
+
+    if ($inputUsername -ne $adminUsername -or $inputPasswordPlain -ne $adminPassword) {
+        Write-Host "Invalid username or password. Access denied." -ForegroundColor Red
+        Start-Sleep -Seconds 2
+        return
+    }
+    Write-Host "Authentication successful. Proceeding to manage troubleshooting steps..." -ForegroundColor Green
+    Start-Sleep -Seconds 1
+
+    # Load custom steps if they exist
+    $stepsFile = "$env:USERPROFILE\Desktop\EcoDesk\Config\CustomSteps.json"
+    $customSteps = if (Test-Path $stepsFile) {
+        Get-Content -Path $stepsFile -Raw | ConvertFrom-Json
+    } else {
         @{}
     }
 
-    # Define Focus Groups (same as SolutionTree)
+    # Define Focus Groups and their Agents (unchanged)
     $focusGroups = @{
         "Messaging" = @{
             "SQL Server" = @("SQL Server", "Azure SQL", "AWS SQL", "Availability Group", "SQL Cluster")
@@ -2608,7 +2621,7 @@ function HandleMatch {
 
 function CreateReferenceLog {
     param (
-        [string]$RefFolder = "\\englog\escalationlogs\references"
+        [string]$RefFolder = "$env:USERPROFILE\Desktop\EcoDesk\Reference"
     )
 
     try {
@@ -2619,8 +2632,16 @@ function CreateReferenceLog {
         # Create directory if it doesn’t exist
         if (-not (Test-Path $RefFolder)) {
             New-Item -ItemType Directory -Path $RefFolder -Force | Out-Null
+            Write-Host "Created reference directory at $RefFolder" -ForegroundColor Green
         }
 
+        $title = Read-Host "Enter title for the reference log (used as filename)"
+        if ([string]::IsNullOrWhiteSpace($title)) {
+            Write-Host "Title cannot be empty. Exiting." -ForegroundColor Red
+            Read-Host "Press Enter to return to menu"
+            return
+        }
+        
         $logCut = Read-Host "Enter the Log Cut (e.g., 'Error: Connection failed')"
         $solution = Read-Host "Enter the Solution (e.g., 'Check network connectivity and restart the service')"
         
@@ -2630,9 +2651,14 @@ function CreateReferenceLog {
             return
         }
 
-        $fileName = "ref_$(Get-Date -Format 'yyyyMMddHHmmss').txt"
+        # Ensure filename is valid by replacing invalid characters
+        $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+        $fileName = ($title.ToLower() -replace "[$invalidChars]", "_") + ".txt"
         $refFile = Join-Path -Path $RefFolder -ChildPath $fileName
-        "Log Cut: $logCut`nSolution: $solution" | Set-Content -Path $refFile
+        
+        # Mask PII in log cut before saving
+        $maskedLogCut = Mask-PII -LogCut $logCut
+        "Log Cut: $maskedLogCut`nSolution: $solution" | Set-Content -Path $refFile
         Write-Host "Reference log saved as $refFile" -ForegroundColor Green
         Read-Host "Press Enter to return to menu"
     } catch {
@@ -2649,22 +2675,28 @@ function Mask-PII {
     if (-not $LogCut) { return $LogCut }
 
     $patterns = @{
-        "ServerName" = "\b(?:[a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+(?:\.com|\.org|\.net|\.local)?\b(?<!\b(?:error|fail|exception|warning|log|file))\b"
-        "Username"   = "\b[a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z0-9_-]+)?\b(?<!\b(?:error|fail|exception|warning|log|file))"
+        # Username: Matches [domain\username] after "Account" (with optional space)
+        "Username"   = "(?<=Account\s?)\[([a-zA-Z0-9-]+\\[a-zA-Z0-9_-]*(?:\.[a-zA-Z0-9_-]+)?)\]"
+        # ServerName: Matches [servername] after "server" (with optional space)
+        "ServerName" = "(?<=server\s?)\[([a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)*)\]"
     }
     $replacements = @{
-        "ServerName" = "[SERVER]"
         "Username"   = "[USERNAME]"
+        "ServerName" = "[SERVER]"
     }
 
     $maskedLogCut = $LogCut
-    foreach ($key in $patterns.Keys) {
+    foreach ($key in @("Username", "ServerName")) {
+        # Debug: Show what’s being matched
+        $matches = [regex]::Matches($maskedLogCut, $patterns[$key])
+        if ($matches.Count -gt 0) {
+            Write-Host "Debug: $key matches: $($matches.Value -join ', ')" -ForegroundColor Gray
+        }
         $maskedLogCut = $maskedLogCut -replace $patterns[$key], $replacements[$key]
     }
 
     return $maskedLogCut
 }
-
 
 function Show-Menu {
     Clear-Host
